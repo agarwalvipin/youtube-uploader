@@ -11,6 +11,16 @@ from pathlib import Path
 from typing import Optional
 
 
+class NoTracebackFilter(logging.Filter):
+    """Filter that removes exception info from log records to prevent tracebacks on console."""
+
+    def filter(self, record):
+        # Remove exception info so traceback text is not printed to console handlers.
+        record.exc_info = None
+        record.exc_text = None
+        return True
+
+
 def setup_logger(
     name: str = "youtube_uploader",
     log_level: str = "INFO",
@@ -79,11 +89,13 @@ def setup_logger(
     error_handler.setFormatter(detailed_formatter)
     logger.addHandler(error_handler)
 
-    # Console handler
+    # Console handler (no traceback text)
     if console_output:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(getattr(logging, log_level.upper()))
         console_handler.setFormatter(simple_formatter)
+        # Prevent full traceback text from being printed to console; tracebacks should go to file handlers only
+        console_handler.addFilter(NoTracebackFilter())
         logger.addHandler(console_handler)
 
     logger.info(f"Logger initialized: {name}")

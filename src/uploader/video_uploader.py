@@ -6,6 +6,7 @@ progress tracking, and retry logic.
 """
 
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -211,11 +212,6 @@ class VideoUploader:
                             "Progress callback raised an exception", exc_info=True
                         )
 
-                    progress_pct = int(fraction * 100)
-                    self.logger.info(
-                        f"Upload progress: {progress_pct}% ({bytes_uploaded}/{total_size} bytes)"
-                    )
-
             except HttpError as e:
                 if getattr(e, "resp", None) and getattr(e.resp, "status", None) in [
                     500,
@@ -263,15 +259,13 @@ class VideoUploader:
         if not self.validate_video_file(video_path):
             return None
 
-        # Lazy import rich components to avoid forcing it in non-interactive environments
+        # Lazy import rich components and provide a backwards-compatible progress UI with safe fallback
         try:
             from rich.console import Console
             from rich.progress import (
                 BarColumn,
                 DownloadColumn,
                 Progress,
-                SpinnerColumn,
-                TaskProgressColumn,
                 TextColumn,
                 TimeRemainingColumn,
                 TransferSpeedColumn,
@@ -305,35 +299,103 @@ class VideoUploader:
                 part=",".join(body.keys()), body=body, media_body=media
             )
 
-            # If no external progress_callback provided and rich is available, create one
-            if progress_callback is None and rich_available:
-                console = Console()
-                progress = Progress(
-                    SpinnerColumn(),
-                    TextColumn("[bold blue]🎬 {task.fields[filename]}"),
-                    BarColumn(bar_width=None),
-                    TaskProgressColumn(show_speed=False),
-                    DownloadColumn(),
-                    TransferSpeedColumn(suffix="B/s"),
-                    TimeRemainingColumn(),
-                    console=console,
-                    transient=True,
-                )
+            # Build stable column set (works across rich versions)
+            progress_columns = [
+                TextColumn("{task.fields[filename]}", justify="left"),
+                BarColumn(bar_width=None),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+            ]
 
+            # If no external progress_callback provided and rich is available, create one lazily
+            progress = None
+            console = None
+            textual_reporter = None
+
+            def make_textual_reporter(logger, filename, total_bytes):
+                """
+                Simple textual fallback progress reporter that logs periodic updates.
+                Shows filename, percent, bytes uploaded, and ETA (computed).
+                """
+
+                class TextualReporter:
+                    def __init__(self):
+                        self.last_percent = -1
+                        self.total = total_bytes
+                        self.filename = filename
+                        self.start_time = time.time()
+
+                    def update(self, completed_bytes):
+                        frac = min(1.0, completed_bytes / max(1, self.total))
+                        pct = int(frac * 100)
+                        elapsed = max(1e-6, time.time() - self.start_time)
+                        speed = completed_bytes / elapsed if elapsed > 0 else 0.0
+                        speed_mb = speed / (1024 * 1024)
+                        remaining = max(0, self.total - completed_bytes)
+                        eta = remaining / speed if speed > 0 else float("inf")
+                        eta_str = f"{int(eta)}s" if eta != float("inf") else "?"
+
+                        # Use carriage return for inline updates
+                        progress_msg = (
+                            f"\rUpload progress: {pct}% "
+                            f"({completed_bytes}/{self.total} bytes) "
+                            f"Speed: {speed_mb:.1f} MB/s ETA: {eta_str}"
+                        )
+                        sys.stdout.write(progress_msg)
+                        sys.stdout.flush()
+
+                        # Log to file only at intervals to avoid spam
+                        if pct != self.last_percent and (pct % 10 == 0 or pct == 100):
+                            logger.debug(
+                                f"{self.filename}: {pct}% ({completed_bytes}/{self.total}) "
+                                f"Speed: {speed_mb:.1f} MB/s ETA={eta_str}"
+                            )
+                            self.last_percent = pct
+
+                    def finalize(self):
+                        """Print newline after progress completes."""
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+
+                return TextualReporter()
+
+            # Create the progress UI if appropriate
+            if progress_callback is None and rich_available:
+                try:
+                    console = Console()
+                    progress = Progress(
+                        *progress_columns, console=console, transient=True
+                    )
+                    # Add task within the context manager scope when actual updates will run
+                    # We'll use a context manager around the upload execution below.
+                    progress_created = True
+                except Exception:
+                    # Rich Progress failed to instantiate (version incompatibility or other issue)
+                    self.logger.exception(
+                        "Failed to create Rich Progress UI, falling back to textual reporter"
+                    )
+                    progress = None
+                    progress_created = False
+
+            # If rich progress was created, run upload inside its context so UI renders
+            if progress is not None:
                 with progress:
                     task_id = progress.add_task(
                         "upload", filename=path.name, total=file_size
                     )
 
                     # Internal callback updates rich progress
-                    def _internal_progress_callback(
-                        fraction, bytes_uploaded, elapsed, speed_bps
-                    ):
+                    def _internal_progress_callback(**kwargs):
                         try:
-                            progress.update(task_id, completed=bytes_uploaded)
+                            completed = kwargs.get("bytes_uploaded", 0)
+                            progress.update(task_id, completed=completed)
                         except Exception:
-                            # Ignore UI update errors
-                            pass
+                            # Ensure UI errors don't break upload
+                            self.logger.debug(
+                                "Rich progress update failed", exc_info=True
+                            )
 
                     start_time = time.time()
                     response = self._execute_upload_with_retry(
@@ -344,12 +406,39 @@ class VideoUploader:
                     upload_duration = time.time() - start_time
 
             else:
-                # Use provided callback (or no rich UI available)
+                # Setup textual reporter fallback or use provided callback
+                if progress_callback is None:
+                    textual_reporter = make_textual_reporter(
+                        self.logger, path.name, file_size
+                    )
+
+                    def _internal_progress_callback(**kwargs):
+                        try:
+                            completed = kwargs.get("bytes_uploaded", 0)
+                            textual_reporter.update(completed)
+                        except Exception:
+                            self.logger.debug(
+                                "Textual progress update failed", exc_info=True
+                            )
+
+                    chosen_callback = _internal_progress_callback
+
+                    # Ensure newline is printed after upload completes
+                    def finalize_progress():
+                        if textual_reporter:
+                            textual_reporter.finalize()
+                else:
+                    chosen_callback = progress_callback
+
                 start_time = time.time()
                 response = self._execute_upload_with_retry(
-                    request, total_size=file_size, progress_callback=progress_callback
+                    request, total_size=file_size, progress_callback=chosen_callback
                 )
                 upload_duration = time.time() - start_time
+
+                # Finalize textual progress output
+                if textual_reporter:
+                    textual_reporter.finalize()
 
             video_id = response.get("id") if response else None
 

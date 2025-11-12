@@ -10,7 +10,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+
+class ConfigValidationError(Exception):
+    """Raised when configuration validation fails for metadata loading."""
+
+    def __init__(self, message: str):
+        """
+        Store a concise, user-facing message describing validation problems.
+        The full traceback is logged to file by the caller using logger.exception(...)
+        or logger.error(..., exc_info=True).
+        """
+        super().__init__(message)
+        self.message = message
+
+    def __str__(self) -> str:
+        return self.message
 
 
 class VideoMetadata(BaseModel):
@@ -284,8 +300,43 @@ class ConfigParser:
         except json.JSONDecodeError as e:
             self.logger.error(f"Invalid JSON in metadata file: {e}")
             raise ValueError(f"Invalid JSON in metadata file: {e}")
+        except ValidationError as e:
+            # Log full traceback at ERROR level so details are in log files
+            self.logger.error(
+                "Metadata validation failed while loading metadata", exc_info=True
+            )
+
+            # Build concise, user-friendly message from pydantic errors()
+            errors = e.errors()
+            header = f"Failed to load metadata: {len(errors)} validation errors"
+            lines = [header]
+            for err in errors:
+                loc = err.get("loc", [])
+                # Represent location as dot-separated string for readability
+                loc_str = ".".join(str(p) for p in loc)
+                msg = err.get("msg", "")
+                lines.append(f"- {loc_str}: {msg}")
+
+            lines.append(
+                "Suggestion: Make sure each video entry has a `filename` and `title` field. "
+                'Example: {"filename":"video.mp4","title":"My Title",...}'
+            )
+            user_message = "\n".join(lines)
+
+            # If rich is available, display in a red ERROR panel; otherwise print plain text
+            try:
+                from rich.console import Console
+                from rich.panel import Panel
+
+                Console().print(Panel(user_message, title="ERROR", style="red"))
+            except Exception:
+                print(user_message)
+
+            # Raise a custom exception so callers can handle programmatically
+            raise ConfigValidationError(user_message)
         except Exception as e:
-            self.logger.error(f"Failed to load metadata: {e}")
+            # Log full traceback for unexpected errors
+            self.logger.error(f"Failed to load metadata: {e}", exc_info=True)
             raise
 
     def get_video_metadata(self, filename: str) -> VideoMetadata:

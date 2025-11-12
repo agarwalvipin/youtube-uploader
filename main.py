@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.auth.authenticator import Authenticator
-from src.config.config_parser import ConfigParser
+from src.config.config_parser import ConfigParser, ConfigValidationError
 from src.playlist.playlist_manager import PlaylistManager
 from src.uploader.video_uploader import VideoUploader
 from src.utils.logger import setup_logger
@@ -291,7 +291,39 @@ class YouTubeUploader:
         if not metadata_file.exists():
             metadata_file = Path("./config/videos_metadata.json")
 
-        self.config_parser.load_video_metadata(str(metadata_file))
+        try:
+            self.config_parser.load_video_metadata(str(metadata_file))
+        except ConfigValidationError as cve:
+            # Full traceback already logged by the parser; present friendly message to console
+            try:
+                from rich.console import Console
+                from rich.panel import Panel
+
+                Console().print(Panel(cve.args[0], title="ERROR", style="bold red"))
+            except Exception:
+                print(cve.args[0])
+            # Log a short guidance message to the file logger
+            if self.logger:
+                self.logger.error(
+                    "Configuration validation failed. See log file for details."
+                )
+            sys.exit(2)
+        except Exception as exc:
+            # Unexpected error while loading metadata — log full traceback to file only
+            if self.logger:
+                self.logger.exception("Unexpected error during initialization")
+                log_dir = Path(self.config.logging.log_directory).absolute()
+            else:
+                log_dir = Path("./logs").absolute()
+            short = f"Unexpected error: {str(exc)}. See logs at {log_dir}"
+            try:
+                from rich.console import Console
+                from rich.panel import Panel
+
+                Console().print(Panel(short, title="ERROR", style="bold red"))
+            except Exception:
+                print(short)
+            sys.exit(1)
 
         # Scan videos
         video_files = self.scan_videos()
