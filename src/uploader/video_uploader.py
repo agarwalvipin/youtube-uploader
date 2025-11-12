@@ -167,12 +167,17 @@ class VideoUploader:
         ),
         reraise=True,
     )
-    def _execute_upload_with_retry(self, request) -> Dict[str, Any]:
+    def _execute_upload_with_retry(
+        self, request, total_size: Optional[int] = None, progress_callback=None
+    ) -> Dict[str, Any]:
         """
-        Execute upload request with retry logic.
+        Execute upload request with retry logic and optional progress callbacks.
 
         Args:
             request: Upload request object
+            total_size: Total size of the file in bytes (used for ETA/speed)
+            progress_callback: Optional callable called with
+                (fraction: float, bytes_uploaded: int, elapsed: float, speed_bps: float)
 
         Returns:
             Response dictionary with video_id
@@ -180,16 +185,44 @@ class VideoUploader:
         response = None
         error_count = 0
 
+        start_time = time.time()
         while response is None:
             try:
                 status, response = request.next_chunk()
 
-                if status:
-                    progress = int(status.progress() * 100)
-                    self.logger.info(f"Upload progress: {progress}%")
+                if status and total_size:
+                    fraction = status.progress()  # 0.0 .. 1.0
+                    bytes_uploaded = int(fraction * total_size)
+                    elapsed = max(1e-6, time.time() - start_time)
+                    speed_bps = bytes_uploaded / elapsed if elapsed > 0 else 0.0
+
+                    # Inform any UI progress callback
+                    try:
+                        if progress_callback:
+                            progress_callback(
+                                fraction=fraction,
+                                bytes_uploaded=bytes_uploaded,
+                                elapsed=elapsed,
+                                speed_bps=speed_bps,
+                            )
+                    except Exception:
+                        # Ensure UI errors don't break upload
+                        self.logger.debug(
+                            "Progress callback raised an exception", exc_info=True
+                        )
+
+                    progress_pct = int(fraction * 100)
+                    self.logger.info(
+                        f"Upload progress: {progress_pct}% ({bytes_uploaded}/{total_size} bytes)"
+                    )
 
             except HttpError as e:
-                if e.resp.status in [500, 502, 503, 504]:
+                if getattr(e, "resp", None) and getattr(e.resp, "status", None) in [
+                    500,
+                    502,
+                    503,
+                    504,
+                ]:
                     # Retryable server errors
                     error_count += 1
                     self.logger.warning(f"Retryable HTTP error {e.resp.status}: {e}")
@@ -220,7 +253,8 @@ class VideoUploader:
         Args:
             video_path: Path to video file
             metadata: Video metadata
-            progress_callback: Optional callback for progress updates
+            progress_callback: Optional callback for progress updates.
+                If None, a lightweight Rich progress UI will be used internally.
 
         Returns:
             Video ID if successful, None otherwise
@@ -228,6 +262,24 @@ class VideoUploader:
         # Validate video file
         if not self.validate_video_file(video_path):
             return None
+
+        # Lazy import rich components to avoid forcing it in non-interactive environments
+        try:
+            from rich.console import Console
+            from rich.progress import (
+                BarColumn,
+                DownloadColumn,
+                Progress,
+                SpinnerColumn,
+                TaskProgressColumn,
+                TextColumn,
+                TimeRemainingColumn,
+                TransferSpeedColumn,
+            )
+
+            rich_available = True
+        except Exception:
+            rich_available = False
 
         try:
             path = Path(video_path)
@@ -253,12 +305,53 @@ class VideoUploader:
                 part=",".join(body.keys()), body=body, media_body=media
             )
 
-            # Execute upload with retry logic
-            start_time = time.time()
-            response = self._execute_upload_with_retry(request)
-            upload_duration = time.time() - start_time
+            # If no external progress_callback provided and rich is available, create one
+            if progress_callback is None and rich_available:
+                console = Console()
+                progress = Progress(
+                    SpinnerColumn(),
+                    TextColumn("[bold blue]🎬 {task.fields[filename]}"),
+                    BarColumn(bar_width=None),
+                    TaskProgressColumn(show_speed=False),
+                    DownloadColumn(),
+                    TransferSpeedColumn(suffix="B/s"),
+                    TimeRemainingColumn(),
+                    console=console,
+                    transient=True,
+                )
 
-            video_id = response.get("id")
+                with progress:
+                    task_id = progress.add_task(
+                        "upload", filename=path.name, total=file_size
+                    )
+
+                    # Internal callback updates rich progress
+                    def _internal_progress_callback(
+                        fraction, bytes_uploaded, elapsed, speed_bps
+                    ):
+                        try:
+                            progress.update(task_id, completed=bytes_uploaded)
+                        except Exception:
+                            # Ignore UI update errors
+                            pass
+
+                    start_time = time.time()
+                    response = self._execute_upload_with_retry(
+                        request,
+                        total_size=file_size,
+                        progress_callback=_internal_progress_callback,
+                    )
+                    upload_duration = time.time() - start_time
+
+            else:
+                # Use provided callback (or no rich UI available)
+                start_time = time.time()
+                response = self._execute_upload_with_retry(
+                    request, total_size=file_size, progress_callback=progress_callback
+                )
+                upload_duration = time.time() - start_time
+
+            video_id = response.get("id") if response else None
 
             if video_id:
                 self.logger.info(

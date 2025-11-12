@@ -8,6 +8,7 @@ metadata loading, upload processing, and playlist management.
 import json
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -120,9 +121,23 @@ class YouTubeUploader:
         Returns:
             True if initialization successful, False otherwise
         """
+        # Attempt to use rich for nicer status output; fall back silently if not available
+        try:
+            from rich.console import Console
+            from rich.panel import Panel
+
+            console = Console()
+            rich_available = True
+        except Exception:
+            console = None
+            rich_available = False
+
         try:
             # Load configuration
-            print("Loading configuration...")
+            if rich_available:
+                console.print(Panel("[blue]Loading configuration...[/blue]"))
+            else:
+                print("Loading configuration...")
             self.config = self.config_parser.load_config(self.config_path)
 
             # Setup logging
@@ -149,11 +164,28 @@ class YouTubeUploader:
                 client_secrets_file=self.config.paths.credentials_file
             )
 
-            # Perform authentication
-            self.logger.info("Authenticating with YouTube API...")
-            if not self.authenticator.authenticate():
+            # Perform authentication with a rich spinner if available
+            auth_success = False
+            if rich_available:
+                with console.status(
+                    "[bold blue]Authenticating with YouTube API...[/bold blue] ⏳",
+                    spinner="dots",
+                ) as st:
+                    auth_success = self.authenticator.authenticate()
+                    # Give a short visual pause for UX if quick
+                    time.sleep(0.1)
+            else:
+                self.logger.info("Authenticating with YouTube API...")
+                auth_success = self.authenticator.authenticate()
+
+            if not auth_success:
+                if rich_available:
+                    console.print("[red]✗ Authentication failed[/red]")
                 self.logger.error("Authentication failed")
                 return False
+            else:
+                if rich_available:
+                    console.print("[green]✓ Authentication successful[/green]")
 
             # Get authenticated service
             youtube_service = self.authenticator.get_authenticated_service()
@@ -164,6 +196,10 @@ class YouTubeUploader:
             # Get user info
             user_info = self.authenticator.get_user_info()
             if user_info:
+                if rich_available:
+                    console.print(
+                        f"[bold green]Authenticated as:[/bold green] [cyan]{user_info['title']}[/cyan]"
+                    )
                 self.logger.info(f"Authenticated as: {user_info['title']}")
 
             # Initialize uploader
@@ -190,6 +226,10 @@ class YouTubeUploader:
             self.upload_history = UploadHistory(self.config.paths.upload_history)
 
             self.logger.info("System initialization completed successfully")
+            if rich_available:
+                console.print(
+                    Panel("[green]System initialization completed successfully[/green]")
+                )
             return True
 
         except Exception as e:
