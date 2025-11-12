@@ -1,0 +1,46 @@
+{
+  "default_metadata": {
+    "category_id": "22",
+    "privacy_status": "public",
+    "tags": ["tutorial", "example"],
+    "language": "en",
+    "playlist": null
+  },
+  "videos": [
+    {
+      "filename": "random_video_1.mp4",
+      "title": "Exploring Randomized Algorithms — Part 1",
+      "description": "A short walkthrough of randomized algorithms and their applications.",
+      "tags": ["algorithms","randomized","CS"],
+      "category_id": "27",
+      "privacy_status": "public",
+      "playlist": "Random Series",
+      "language": "en"
+    },
+    {
+      "filename": "random_video_2.mp4",
+      "title": "Data Engineering Tips — Episode 2",
+      "description": "Practical tips for building reliable data pipelines.",
+      "tags": ["data engineering","pipelines","ETL"],
+      "category_id": "28",
+      "privacy_status": "unlisted",
+      "playlist": "Data Series",
+      "language": "en"
+    },
+    {
+      "filename": "random_video_3.mp4",
+      "title": "Cloud Cost Optimization — Quick Guide",
+      "description": "Techniques to reduce cloud spend without sacrificing performance.",
+      "tags": ["cloud","cost","ops"],
+      "category_id": "22",
+      "privacy_status": "private",
+      "playlist": null,
+      "language": "en"
+    }
+  ],
+  "fallback": {
+    "title_template": "{filename}",
+    "description_template": "Uploaded on {date}",
+    "use_filename_as_title": true
+  }
+}

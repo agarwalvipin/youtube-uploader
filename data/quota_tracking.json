@@ -1,0 +1,20 @@
+{
+  "daily_quota": 10000,
+  "used_quota": 1650,
+  "remaining_quota": 8350,
+  "reset_time": "2025-11-13T08:00:00+00:00",
+  "operations": [
+    {
+      "type": "video_upload",
+      "cost": 1600,
+      "timestamp": "2025-11-12T14:51:06.634115+00:00",
+      "details": "Reading 10- Simple Linear Regression \u2014 Part 1"
+    },
+    {
+      "type": "playlist_insert",
+      "cost": 50,
+      "timestamp": "2025-11-12T14:51:08.891407+00:00",
+      "details": "Quantitative Methods Series"
+    }
+  ]
+}
